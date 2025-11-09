@@ -34,6 +34,35 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Add mobile/viewport meta and a small responsive CSS layer to improve behavior
+# on narrow screens (phones/tablets). This complements existing styles.
+st.markdown("""
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* Ensure images and plot containers scale on small screens */
+img, .js-plotly-plot, .stImage > img {
+    max-width: 100% !important;
+    height: auto !important;
+}
+
+/* Make sidebar use full width on very small screens */
+@media (max-width: 600px) {
+    [data-testid="stSidebar"] {
+        position: relative !important;
+        width: 100% !important;
+        transform: none !important;
+    }
+    .block-container, .stApp, .main {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+    .flex-grid {
+        grid-template-columns: 1fr !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_default_csv(path):
@@ -781,11 +810,11 @@ def main():
     <span style='color:#4F8A8B;font-size:16px;'>Discover student lifestyle clusters and wellness insights.</span>
     """, unsafe_allow_html=True)
     
-    # CSV Upload in sidebar (less prominent)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Upload Data (Optional)**")
-    data_file = st.sidebar.file_uploader("CSV file", type=["csv"], label_visibility="collapsed")
-    default_csv_path = os.path.join(os.getcwd(), "data.csv")
+    # The app always uses the bundled `data.csv` that lives next to this script.
+    # We intentionally remove the upload option so predictions always come from
+    # the repository-provided data.csv (persistent, consistent behavior for users).
+    default_csv_path = os.path.join(os.path.dirname(__file__), "data.csv")
+    st.sidebar.markdown(f"**Default CSV path:** `{default_csv_path}`")
     
     cost_tolerant = st.sidebar.checkbox("Cost-tolerant mode", value=True)
     st.session_state['cost_tolerant'] = cost_tolerant
@@ -1299,14 +1328,12 @@ def main():
 
     # Load data (from sidebar upload or default) - with progress indicator
     start_time = time.time()
-    if data_file is not None:
-        with st.spinner("Loading CSV file..."):
-            df_raw = pd.read_csv(data_file)
-        st.sidebar.success("✅ CSV loaded")
+    # Always load the default CSV from the app folder
+    df_raw = load_default_csv(default_csv_path)
+    if df_raw is None:
+        st.sidebar.warning(f"No default CSV found at `{default_csv_path}` — please add `data.csv` to the app folder.")
     else:
-        df_raw = load_default_csv(default_csv_path)
-        if df_raw is None:
-            st.sidebar.info("Using default data")
+        st.sidebar.success(f"Loaded default CSV: `{os.path.basename(default_csv_path)}`")
 
     required_cols = [
         "eating_out_per_week",
@@ -1359,34 +1386,135 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-        # Enhanced visualizations section
-        st.markdown("""
-        <div style='margin-top:2em;margin-bottom:1em;'>
-            <h3 style='color:#1a2636;font-size:1.5rem;font-weight:600;'>🎯 Interactive Visualizations</h3>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Create grid layout for visualizations
-        viz_col1, viz_col2 = st.columns(2)
-        
-        with viz_col1:
-            # Use cached PCA charts
-            colors_list = ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#00f2fe', '#ff6b6b', '#4ecdc4', '#ffe66d']
-            fig_3d, fig_2d, df_pca_3d, df_pca_2d = create_pca_charts(X_scaled, labels, persona_names, colors_list)
-            
-            # Update df_imp with PCA data
-            df_imp["pca1"] = df_pca_3d['pca1'].values
-            df_imp["pca2"] = df_pca_3d['pca2'].values
-            df_imp["pca3"] = df_pca_3d['pca3'].values
-            
-            st.plotly_chart(fig_3d, use_container_width=True, config={'displayModeBar': True, 'responsive': True})
-        
-        with viz_col2:
-            # Update df_imp with 2D PCA data
-            df_imp["pca1_2d"] = df_pca_2d['pca1_2d'].values
-            df_imp["pca2_2d"] = df_pca_2d['pca2_2d'].values
-            
-            st.plotly_chart(fig_2d, use_container_width=True, config={'displayModeBar': True, 'responsive': True})
+        # Comprehensive Analysis section
+        # Provide a robust set of static analyses (summary stats, distributions, correlations,
+        # PCA variance, clustering metrics and cross-tabs) that are less likely to behave
+        # inconsistently across deployments than fully interactive Plotly charts.
+        with st.expander("🔎 Data Analysis & Diagnostics", expanded=False):
+            st.markdown("""
+            <div style='margin-bottom:0.5em;'>
+                <h3 style='color:#1a2636;font-size:1.2rem;font-weight:600;'>Dataset summary & diagnostics</h3>
+                <p style='color:#555;margin-top:0.2em;'>Overview statistics, missing values, distributions and clustering diagnostics derived from the loaded dataset.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Basic summary
+            st.subheader("Basic dataset info")
+            st.write(f"Rows: {len(df_raw)} — Features: {len(df_raw.columns)}")
+            try:
+                st.write("**Missing values (per column)**")
+                mv = df_raw.isnull().sum()
+                st.dataframe(mv[mv > 0].sort_values(ascending=False))
+            except Exception:
+                pass
+
+            # Numeric summary from imputed dataframe
+            st.subheader("Descriptive statistics (numeric features)")
+            numeric_cols = df_imp.select_dtypes(include=[np.number]).columns.tolist()
+            if numeric_cols:
+                st.dataframe(df_imp[numeric_cols].describe().T.round(3))
+
+            # Plots helper
+            def fig_to_bytes(fig):
+                buf = BytesIO()
+                fig.savefig(buf, format="png", dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                buf.seek(0)
+                return buf
+
+            # Distributions for required columns
+            st.subheader("Feature distributions")
+            for col in required_cols:
+                try:
+                    fig, ax = plt.subplots(figsize=(6, 3))
+                    sns.histplot(df_imp[col].dropna(), kde=True, ax=ax, color='#667eea')
+                    ax.set_title(f"Distribution: {col}")
+                    ax.set_ylabel("count")
+                    buf = fig_to_bytes(fig)
+                    st.image(buf, use_column_width=True)
+                except Exception:
+                    st.write(f"Could not plot distribution for {col}")
+
+            # Boxplots
+            st.subheader("Boxplots (outliers)")
+            try:
+                fig, axes = plt.subplots(1, len(required_cols), figsize=(4 * len(required_cols), 3))
+                if len(required_cols) == 1:
+                    axes = [axes]
+                for ax, col in zip(axes, required_cols):
+                    sns.boxplot(y=df_imp[col], ax=ax, color='#764ba2')
+                    ax.set_title(col)
+                buf = fig_to_bytes(fig)
+                st.image(buf, use_column_width=True)
+            except Exception:
+                pass
+
+            # Correlation heatmap
+            st.subheader("Correlation matrix")
+            try:
+                corr = df_imp.corr()
+                fig, ax = plt.subplots(figsize=(6, 5))
+                sns.heatmap(corr, annot=True, fmt='.2f', cmap='vlag', ax=ax)
+                ax.set_title('Feature correlation (imputed data)')
+                buf = fig_to_bytes(fig)
+                st.image(buf, use_column_width=True)
+            except Exception:
+                st.write("Correlation matrix could not be computed.")
+
+            # PCA explained variance (stable scalar summary)
+            st.subheader("PCA (variance explained)")
+            try:
+                pca_n = min(4, X_scaled.shape[1])
+                from sklearn.decomposition import PCA as SKPCA
+                pca_model = SKPCA(n_components=pca_n, random_state=42)
+                pca_model.fit(X_scaled)
+                evr = pca_model.explained_variance_ratio_
+                evr_df = pd.DataFrame({'component': [f'PC{i+1}' for i in range(len(evr))], 'explained_variance_ratio': evr})
+                st.dataframe(evr_df.round(3))
+                # Scree plot
+                fig, ax = plt.subplots(figsize=(6, 3))
+                ax.plot(range(1, len(evr)+1), evr, marker='o')
+                ax.set_xlabel('PC')
+                ax.set_ylabel('Explained variance ratio')
+                ax.set_title('Scree plot')
+                buf = fig_to_bytes(fig)
+                st.image(buf, use_column_width=True)
+            except Exception:
+                st.write("PCA could not be computed")
+
+            # Clustering diagnostics
+            st.subheader("Clustering diagnostics")
+            try:
+                if len(set(labels)) > 1 and len(X_scaled) > len(set(labels)):
+                    sil = silhouette_score(X_scaled, labels)
+                    db = davies_bouldin_score(X_scaled, labels)
+                    st.write(f"Silhouette score: **{sil:.3f}**")
+                    st.write(f"Davies-Bouldin score: **{db:.3f}**")
+                else:
+                    st.write("Not enough clusters/samples to compute clustering diagnostics.")
+            except Exception:
+                st.write("Clustering diagnostics unavailable")
+
+            # Cluster counts and simple crosstabs
+            st.subheader("Cluster counts & budget cross-tab")
+            try:
+                st.bar_chart(cluster_counts)
+                # budget buckets
+                df_imp['budget_bucket'] = pd.cut(df_imp['food_budget_per_meal_inr'], bins=[-1,99,149,199,499,10000], labels=['<=99','100-149','150-199','200-499','500+'])
+                ct = pd.crosstab(df_imp['cluster'], df_imp['budget_bucket'])
+                st.dataframe(ct)
+            except Exception:
+                st.write("Could not compute cluster cross-tabs")
+
+            # Save a copy of analysis outputs for download
+            try:
+                analysis_out = os.path.join(os.getcwd(), 'outputs')
+                os.makedirs(analysis_out, exist_ok=True)
+                evr_df.to_csv(os.path.join(analysis_out, 'pca_explained_variance.csv'), index=False)
+                ct.to_csv(os.path.join(analysis_out, 'cluster_budget_crosstab.csv'))
+                st.success(f"Analysis artifacts saved to: {analysis_out}")
+            except Exception:
+                pass
 
         # Enhanced cluster centers display with persona names - make it collapsible
         with st.expander("📈 Cluster Centers (Average Values)", expanded=False):
@@ -1428,17 +1556,13 @@ def main():
         centers_norm = mms.fit_transform(centers_orig)
         centers_norm_df = pd.DataFrame(centers_norm, columns=required_cols)
 
-        # Interactive Radar Chart
+        # Interactive Radar Chart disabled
         st.markdown("""
         <div style='margin-top:2em;margin-bottom:1em;'>
-            <h3 style='color:#1a2636;font-size:1.5rem;font-weight:600;'>📊 Feature Comparison - Interactive Radar Chart</h3>
+            <h3 style='color:#1a2636;font-size:1.5rem;font-weight:600;'>📊 Feature Comparison - Interactive Radar Chart (disabled)</h3>
+            <p style='color:#555;'>Radar chart feature comparison has been disabled because it caused inconsistent UI behavior. The cluster centers table and persona cards remain available.</p>
         </div>
         """, unsafe_allow_html=True)
-        
-        # Use cached radar chart
-        fig_radar = create_radar_chart_cached(centers_norm_df, required_cols, persona_names)
-        
-        st.plotly_chart(fig_radar, use_container_width=True, config={'displayModeBar': True, 'responsive': True})
         
         # Traditional radar chart removed to save space - interactive chart above is sufficient
         
